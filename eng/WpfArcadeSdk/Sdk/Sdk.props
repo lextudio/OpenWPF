@@ -28,6 +28,37 @@
     <WpfRuntimeIdentifier Condition="'$(Platform)'=='arm64'">win-arm64</WpfRuntimeIdentifier>
   </PropertyGroup>
 
+  <!--
+    The transport assemblies listed below contain no architecture-specific IL: not one of these
+    projects has a single architecture-conditional #if, and the x64 and arm64 builds of each come out
+    byte-identical in length - PlatformTarget only stamps the PE header's machine field, it does not
+    change the emitted IL. Building them per-Platform therefore produces N copies that differ solely
+    in a field that makes each copy UNLOADABLE on the other architectures.
+
+    That is not a theoretical concern. LibreWPF.Transport is an arch-neutral package, so whatever
+    lands in its lib/net10.0 is what every consumer without a RuntimeIdentifier loads. Because these
+    were stamped with whichever Platform the packaging machine happened to build last, the published
+    package worked on exactly one architecture: an x64 host died during startup with
+    'Could not load file or assembly System.Windows.Controls.Ribbon' (an arm64 stamp), and stamping
+    them x64 instead broke arm64 in precisely the same way. Forcing AnyCPU yields one assembly that
+    loads everywhere, and leaves the per-RID payload under runtimes/<rid>/ carrying only what is
+    genuinely architecture-specific.
+
+    Deliberately a whitelist rather than a blanket rule for every .csproj:
+      - DirectWriteForwarder and System.Printing are C++/CLI (.vcxproj), cannot be AnyCPU, and are
+        unaffected by this property - they stay per-RID.
+      - PresentationBuildTasks is excluded on purpose: it is an MSBuild task assembly the build
+        deliberately produces as x86 (see eng/progpu-wpf-windows-managed-runtime.ps1).
+      - Test and harness projects are left alone so their architecture-targeted runs keep working.
+  -->
+  <PropertyGroup>
+    <LibreWpfArchNeutralTransportAssemblies>WindowsBase;System.Xaml;UIAutomationTypes;UIAutomationProvider;System.Windows.Input.Manipulations;System.Windows.Primitives;System.Windows.Presentation;PresentationCore;ReachFramework;PresentationUI;PresentationFramework;System.Windows.Controls.Ribbon;PresentationFramework.Aero;PresentationFramework.Aero2;PresentationFramework.AeroLite;PresentationFramework.Classic;PresentationFramework.Fluent;PresentationFramework.Luna;PresentationFramework.Royale</LibreWpfArchNeutralTransportAssemblies>
+    <_LibreWpfArchNeutralList>;$(LibreWpfArchNeutralTransportAssemblies);</_LibreWpfArchNeutralList>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectExtension)'=='.csproj' and $(_LibreWpfArchNeutralList.Contains(';$(MSBuildProjectName);'))">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+  </PropertyGroup>
+
   <Import Project="$(WpfArcadeSdkToolsDir)RuntimeFrameworkReference.props"/>
   <Import Project="$(WpfArcadeSdkToolsDir)SystemResources.props"/>
   <Import Project="$(WpfArcadeSdkToolsDir)TargetFrameworks.props" />

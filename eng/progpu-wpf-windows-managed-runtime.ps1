@@ -6,16 +6,13 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $buildCommand = Join-Path $repoRoot "build.cmd"
-$buildTasksProject = Join-Path $repoRoot "src/Microsoft.DotNet.Wpf/src/PresentationBuildTasks/PresentationBuildTasks.csproj"
-$project = Join-Path $repoRoot "src/Microsoft.DotNet.Wpf/src/PresentationCore/PresentationCore.csproj"
+$srcDir = Join-Path $repoRoot "src/Microsoft.DotNet.Wpf/src"
 $outputDirectory = Join-Path $repoRoot "artifacts/windows-managed-runtime"
 $versionDetailsPath = Join-Path $repoRoot "eng/Version.Details.props"
 $packagesDirectory = Join-Path $repoRoot ".packages"
 
 Remove-Item -Path $outputDirectory -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-
-$perlCommand = (Get-Command perl.exe -ErrorAction Stop).Source
 
 $versionDetails = [xml](Get-Content -Path $versionDetailsPath -Raw)
 $netCoreAppVersion = [string]($versionDetails.Project.PropertyGroup.MicrosoftNETCoreAppRefPackageVersion | Select-Object -First 1)
@@ -73,7 +70,6 @@ function Invoke-WpfProjectBuild([string] $projectPath, [string] $platform, [stri
         -nativeToolsOnMachine `
         -excludeCIBinarylog `
         -warnAsError 0 `
-        "/p:PerlCommand=$perlCommand" `
         $runtimeIdentifierArgument `
         $ijwHostArgument `
         /p:RunNetFrameworkApiCompat=false `
@@ -83,7 +79,44 @@ function Invoke-WpfProjectBuild([string] $projectPath, [string] $platform, [stri
     }
 }
 
+$buildTasksProject = Join-Path $srcDir "PresentationBuildTasks/PresentationBuildTasks.csproj"
 Invoke-WpfProjectBuild $buildTasksProject "x86" ""
+
+# All managed transport assemblies that must be built per-RID.
+# PresentationCore is built first (with DirectWriteForwarder via project ref).
+# The remaining top-level assemblies are built separately after PresentationCore.
+$transportProjects = @(
+    "PresentationCore/PresentationCore.csproj",
+    "PresentationFramework/PresentationFramework.csproj",
+    "PresentationUI/PresentationUI.csproj",
+    "ReachFramework/ReachFramework.csproj",
+    "System.Windows.Controls.Ribbon/System.Windows.Controls.Ribbon.csproj"
+)
+
+$themeProjects = @(
+    "Themes/PresentationFramework.Aero/PresentationFramework.Aero.csproj",
+    "Themes/PresentationFramework.Aero2/PresentationFramework.Aero2.csproj",
+    "Themes/PresentationFramework.AeroLite/PresentationFramework.AeroLite.csproj",
+    "Themes/PresentationFramework.Classic/PresentationFramework.Classic.csproj",
+    "Themes/PresentationFramework.Fluent/PresentationFramework.Fluent.csproj",
+    "Themes/PresentationFramework.Luna/PresentationFramework.Luna.csproj",
+    "Themes/PresentationFramework.Royale/PresentationFramework.Royale.csproj"
+)
+
+# Assemblies produced by PresentationCore's dependency graph (built transitively).
+# Collected from the build output so we don't re-build them.
+$transitiveAssemblies = @(
+    "WindowsBase",
+    "System.Xaml",
+    "System.Windows.Primitives",
+    "System.Windows.Input.Manipulations",
+    "System.Windows.Presentation",
+    "UIAutomationProvider",
+    "UIAutomationTypes",
+    "System.Private.Windows.Core",
+    "Microsoft.Win32.SystemEvents",
+    "System.Printing"
+)
 
 $runtimePlatforms = [ordered]@{
     "win-x86" = "x86"
@@ -99,41 +132,96 @@ foreach ($entry in $runtimePlatforms.GetEnumerator()) {
         throw "The $runtimeIdentifier IJW host was not restored at $ijwHost."
     }
 
-    Invoke-WpfProjectBuild $project $platform $runtimeIdentifier $ijwHost
+    Write-Host "`n==> Building managed transport for $runtimeIdentifier ($platform)..."
 
-    $presentationCore = Join-Path $repoRoot "artifacts/bin/PresentationCore/$platform/$Configuration/net10.0/$runtimeIdentifier/PresentationCore.dll"
-    if (!(Test-Path $presentationCore)) {
-        throw "The Windows PresentationCore build did not produce $presentationCore."
+    # Build PresentationCore (also builds DirectWriteForwarder + transitive dependencies)
+    $presentationCoreProject = Join-Path $srcDir "PresentationCore/PresentationCore.csproj"
+    Invoke-WpfProjectBuild $presentationCoreProject $platform $runtimeIdentifier $ijwHost
+
+    # Build remaining top-level transport assemblies
+    foreach ($proj in $transportProjects) {
+        if ($proj -like "PresentationCore/*") { continue }
+        $projectPath = Join-Path $srcDir $proj
+        Write-Host "  Building $proj..."
+        Invoke-WpfProjectBuild $projectPath $platform $runtimeIdentifier ""
     }
 
-    $directWriteForwarderRoot = Join-Path $repoRoot "artifacts/bin/DirectWriteForwarder"
-    if ($platform -ne "x86") {
-        $directWriteForwarderRoot = Join-Path $directWriteForwarderRoot $platform
+    # Build theme assemblies
+    foreach ($proj in $themeProjects) {
+        $projectPath = Join-Path $srcDir $proj
+        Write-Host "  Building $proj..."
+        Invoke-WpfProjectBuild $projectPath $platform $runtimeIdentifier ""
     }
 
-    $directWriteForwarder = Join-Path $directWriteForwarderRoot "$Configuration/net10.0/DirectWriteForwarder.dll"
-    if (!(Test-Path $directWriteForwarder)) {
-        throw "The Windows PresentationCore build did not produce $directWriteForwarder."
-    }
-
+    # Stage the output: collect all built assemblies into the RID-specific payload directory.
     $runtimeOutput = Join-Path $outputDirectory "$runtimeIdentifier/net10.0"
     New-Item -ItemType Directory -Path $runtimeOutput -Force | Out-Null
-    Copy-Item $presentationCore (Join-Path $runtimeOutput "PresentationCore.dll") -Force
-    Copy-Item $directWriteForwarder (Join-Path $runtimeOutput "DirectWriteForwarder.dll") -Force
 
+    # Helper: copy a DLL from the build output to the runtime output.
+    # Handles the different output path conventions (platform subfolder, RID suffix, etc.)
+    function Copy-IfBuilt([string] $dllName, [string[]] $searchRoots) {
+        foreach ($root in $searchRoots) {
+            $candidates = @(
+                (Join-Path $root "$platform/$Configuration/net10.0/$runtimeIdentifier/$dllName"),
+                (Join-Path $root "$platform/$Configuration/net10.0/$dllName"),
+                (Join-Path $root "$Configuration/net10.0/$dllName")
+            )
+            foreach ($candidate in $candidates) {
+                if (Test-Path $candidate) {
+                    Copy-Item $candidate (Join-Path $runtimeOutput $dllName) -Force
+                    return $true
+                }
+            }
+        }
+        return $false
+    }
+
+    # Copy PresentationCore (with RID suffix in output path)
+    $pcDll = Join-Path $repoRoot "artifacts/bin/PresentationCore/$platform/$Configuration/net10.0/$runtimeIdentifier/PresentationCore.dll"
+    if (!(Test-Path $pcDll)) { throw "PresentationCore.dll not found for $runtimeIdentifier at $pcDll" }
+    Copy-Item $pcDll (Join-Path $runtimeOutput "PresentationCore.dll") -Force
+
+    # Copy DirectWriteForwarder (no RID suffix)
+    $dwfRoot = Join-Path $repoRoot "artifacts/bin/DirectWriteForwarder"
+    if ($platform -ne "x86") { $dwfRoot = Join-Path $dwfRoot $platform }
+    $dwfDll = Join-Path $dwfRoot "$Configuration/net10.0/DirectWriteForwarder.dll"
+    if (!(Test-Path $dwfDll)) { throw "DirectWriteForwarder.dll not found for $runtimeIdentifier at $dwfDll" }
+    Copy-Item $dwfDll (Join-Path $runtimeOutput "DirectWriteForwarder.dll") -Force
+
+    # Copy top-level transport assemblies
+    foreach ($proj in $transportProjects) {
+        $name = [System.IO.Path]::GetFileNameWithoutExtension($proj)
+        if ($name -eq "PresentationCore") { continue }
+        $searchRoots = @((Join-Path $repoRoot "artifacts/bin/$name"))
+        if (!(Copy-IfBuilt "$name.dll" $searchRoots)) {
+            Write-Host "  WARNING: $name.dll not found in build output, skipping."
+        }
+    }
+
+    # Copy theme assemblies
+    foreach ($proj in $themeProjects) {
+        $name = [System.IO.Path]::GetFileNameWithoutExtension($proj)
+        $searchRoots = @((Join-Path $repoRoot "artifacts/bin/$name"))
+        if (!(Copy-IfBuilt "$name.dll" $searchRoots)) {
+            Write-Host "  WARNING: $name.dll not found in build output, skipping."
+        }
+    }
+
+    # Copy transitive dependency assemblies
+    foreach ($name in $transitiveAssemblies) {
+        $searchRoots = @((Join-Path $repoRoot "artifacts/bin/$name"))
+        if (!(Copy-IfBuilt "$name.dll" $searchRoots)) {
+            Write-Host "  WARNING: $name.dll not found in build output, skipping."
+        }
+    }
+
+    # Copy native IJW host
     $nativeRuntimeOutput = Join-Path $outputDirectory "$runtimeIdentifier/native"
     New-Item -ItemType Directory -Path $nativeRuntimeOutput -Force | Out-Null
     Copy-Item $ijwHost (Join-Path $nativeRuntimeOutput "ijwhost.dll") -Force
 
-    $pdb = [System.IO.Path]::ChangeExtension($presentationCore, ".pdb")
-    if (Test-Path $pdb) {
-        Copy-Item $pdb (Join-Path $runtimeOutput "PresentationCore.pdb") -Force
-    }
-
-    $directWriteForwarderPdb = [System.IO.Path]::ChangeExtension($directWriteForwarder, ".pdb")
-    if (Test-Path $directWriteForwarderPdb) {
-        Copy-Item $directWriteForwarderPdb (Join-Path $runtimeOutput "DirectWriteForwarder.pdb") -Force
-    }
+    $stagedCount = (Get-ChildItem $runtimeOutput -Filter "*.dll").Count
+    Write-Host "  Staged $stagedCount assemblies for $runtimeIdentifier"
 }
 
-Write-Host "Staged Windows managed runtime payload at $outputDirectory."
+Write-Host "`nStaged Windows managed runtime payload at $outputDirectory."

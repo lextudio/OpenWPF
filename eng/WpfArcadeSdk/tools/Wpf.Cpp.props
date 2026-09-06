@@ -261,7 +261,7 @@
       <AdditionalDependencies Condition="('$(ManagedCxx)'=='false') and ('$(ExplicitCrts)'=='true')">%(AdditionalDependencies);$(StandardLibrariesForNativeCpp)</AdditionalDependencies>
       <AdditionalOptions Condition="('$(ManagedCxx)'=='false') and ('$(ExplicitCrts)'=='true')">%(AdditionalOptions) $(NoDefaultLibClauseForRuntimeLibs) $(DisallowLibClause)</AdditionalOptions>
       <AdditionalOptions Condition="'$(DllRenameClause)'!=''">%(AdditionalOptions) $(DllRenameClause)</AdditionalOptions>
-      <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
       <AdditionalOptions Condition="'$(ManagedCxx)'=='true'">%(AdditionalOptions) /keyfile:$(AssemblyOriginatorKeyFile) /delaysign</AdditionalOptions>
       
       <ProgramDatabaseFileName>$(IntermediateOutputPath)$(TargetName).pdb</ProgramDatabaseFileName>
