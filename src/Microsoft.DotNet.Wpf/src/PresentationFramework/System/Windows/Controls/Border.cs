@@ -17,7 +17,9 @@ namespace System.Windows.Controls
     /// <summary>
     /// The Border decorator is used to draw a border and/or background around another element.
     /// </summary>
-    public class Border : Decorator
+    // IPortableVisualOwnerHost is re-implemented here (Decorator already implements it) so a
+    // Border that actually paints reports itself as pointer content - see the member below.
+    public class Border : Decorator, IPortableVisualOwnerHost
     {
         //-------------------------------------------------------------------
         //
@@ -41,6 +43,21 @@ namespace System.Windows.Controls
         /// </remarks>
         public Border() : base()
         {
+        }
+
+        // Decorator is pointer infrastructure because a bare decorator draws nothing, but a Border
+        // with a Background or BorderBrush renders its own geometry and is a real hit-test target
+        // in WPF - Background="Transparent" being the idiom for invisible-but-hit-testable. Without
+        // re-implementing this the pointer walked past such a Border to the nearest Content
+        // ancestor; see the matching note on Panel.PortableVisualOwnerKind for the measured symptom.
+        PortableVisualOwnerKind IPortableVisualOwnerHost.PortableVisualOwnerKind
+        {
+            get
+            {
+                return Background != null || BorderBrush != null
+                    ? PortableVisualOwnerKind.Content
+                    : PortableVisualOwnerKind.PointerInfrastructure;
+            }
         }
 
         #endregion

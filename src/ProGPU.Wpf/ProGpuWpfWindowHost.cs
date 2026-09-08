@@ -1303,7 +1303,29 @@ public unsafe sealed class ProGpuWpfWindowHost : IDisposable
 
     private void DisposeDeferredNativeWindowIfNeeded()
     {
-        if (!_disposeNativeWindowWhenLoopExits || _isNativeLoopRunning)
+        // Must re-check EVERY condition that made the disposal deferred in the first place (see
+        // Dispose), not just this host's own loop flag. Deferring correctly and then performing the
+        // disposal at an equally illegal moment is the same crash, only later.
+        //
+        // The one that was missing here is the process-wide dispatch depth. DoEvents() reaches this
+        // method, and DoEvents() can itself be running underneath a native callback of a DIFFERENT
+        // host - a nested dispatcher frame is enough to get there. Observed in OpenDevelop: a GLFW
+        // mouse-move callback delivered a WPF PreviewMouseMove that started DragDrop.DoDragDrop,
+        // whose modal PushFrame pumped the window hosts, and disposing here called Silk.NET's
+        // Reset() while GLFW was still inside its own event poll:
+        //   InvalidOperationException: You cannot call `Reset` inside of the render loop!
+        // _isNativeLoopRunning was false the whole time, because the host being disposed was not
+        // the host whose loop was running - which is exactly the gap
+        // s_activeNativeEventDispatchDepth was introduced to close.
+        //
+        // Staying deferred is always safe: every native-loop exit and every DoEvents() calls this
+        // again, so the disposal happens at the next moment that is actually legal.
+        if (!_disposeNativeWindowWhenLoopExits ||
+            _isNativeLoopRunning ||
+            _isRendering ||
+            _isProcessingDispatcherWorkWakeup ||
+            _isInNativeWindowCloseCallback ||
+            Volatile.Read(ref s_activeNativeEventDispatchDepth) > 0)
         {
             return;
         }

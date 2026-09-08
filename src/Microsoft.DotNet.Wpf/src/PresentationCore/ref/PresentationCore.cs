@@ -1171,6 +1171,7 @@ namespace System.Windows
     }
     public partial interface IPortableVisualOwnerHost
     {
+        bool IsPortableHitTestVisible { get { throw null; } }
         bool IsPortableInputEnabled { get; }
         object PortableVisualParent { get; }
         System.Windows.PortableVisualOwnerKind PortableVisualOwnerKind { get; }

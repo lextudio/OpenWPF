@@ -43,7 +43,22 @@ namespace System.Windows.Controls
 
         PortableVisualOwnerKind IPortableVisualOwnerHost.PortableVisualOwnerKind
         {
-            get { return PortableVisualOwnerKind.PointerInfrastructure; }
+            // A Panel is pointer infrastructure only while it draws nothing of its own. With a
+            // Background it renders a rectangle over its whole render bounds (see OnRender below)
+            // and is therefore a real hit-test target in WPF - Background="Transparent" is THE
+            // idiom for an invisible-but-hit-testable element, and it must not be treated as a
+            // pass-through. Reporting PointerInfrastructure unconditionally made the pointer walk
+            // up from such a panel to its nearest Content ancestor, so a transparent overlay Canvas
+            // laid over other content never received input at all: measured on OpenDevelop's GTK
+            // designer, whose drop overlay never saw a single DragOver while its opaque
+            // counterpart in the MewUI designer worked, and reproduced minimally as a transparent
+            // Canvas over a drawn sibling resolving to the enclosing Button instead of the Canvas.
+            get
+            {
+                return Background != null
+                    ? PortableVisualOwnerKind.Content
+                    : PortableVisualOwnerKind.PointerInfrastructure;
+            }
         }
 
         #endregion

@@ -716,13 +716,40 @@ public unsafe sealed class ProGpuWpfCompositionTarget : IDisposable
         for (int i = 0; i < resultCount && ownerCount < owners.Length; i++)
         {
             if (GpuHitTestOwnerMap.TryGetOwner(results[i].Id, out object? owner) &&
-                owner != null)
+                owner != null &&
+                CanBePointerTarget(owner))
             {
                 owners[ownerCount++] = owner;
             }
         }
 
         return ownerCount;
+    }
+
+    /// <summary>
+    /// IsHitTestVisible=false means the pointer passes straight through in WPF, so such an element
+    /// can never be a pointer target. Callers receive owners in a FIXED-SIZE span (64), and the
+    /// span is filled in descending Z order, so letting these through does more than add noise: a
+    /// stack of purely decorative visuals starves the buffer and every real target behind them is
+    /// truncated away, leaving the point with no resolvable target at all. Measured on
+    /// OpenDevelop's Uno XAML designer, whose gridline overlay (a Canvas with
+    /// IsHitTestVisible=false holding one Line per grid cell) put 61 Lines on top of the design
+    /// surface: the owner list came back as exactly 64 entries - 61 Lines plus 3 adorner/auto-hide
+    /// visuals - with the entire workbench chain, the design surface control included, cut off, so
+    /// no click on the design surface was ever delivered.
+    ///
+    /// Only IsHitTestVisible is checked, deliberately. IsEnabled and IsVisible are NOT: a disabled
+    /// element is still hit-testable in WPF and must keep swallowing input rather than letting it
+    /// through to whatever is behind it, and the caller's own normalization already decides what a
+    /// disabled hit means (see WpfPortablePresentationSourceBridge.TryNormalizePointerInputOwner).
+    /// </summary>
+    private static bool CanBePointerTarget(object owner)
+    {
+        return owner switch
+        {
+            System.Windows.IPortableVisualOwnerHost host => host.IsPortableHitTestVisible,
+            _ => true,
+        };
     }
 
     private bool TryResolveFirstHitTestOwner(

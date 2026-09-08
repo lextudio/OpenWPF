@@ -133,6 +133,11 @@ namespace System.Windows
             get { return IsEnabled && IsVisible && IsHitTestVisible; }
         }
 
+        bool IPortableVisualOwnerHost.IsPortableHitTestVisible
+        {
+            get { return IsHitTestVisible; }
+        }
+
         PortableVisualOwnerKind IPortableVisualOwnerHost.PortableVisualOwnerKind
         {
             get { return PortableVisualOwnerKind.Content; }
